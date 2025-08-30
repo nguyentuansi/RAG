@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  streamlit:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ./data:/app/data
+      - ./pipeline:/app/pipeline
+      - ./visualizer:/app/visualizer
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    command: ["streamlit", "run", "visualizer/app.py", "--server.address", "0.0.0.0"]
+
+  mcp-server:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ./data:/app/data
+      - ./mcp_server:/app/mcp_server
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    command: ["python", "-m", "mcp_server.server"]
+
+volumes:
+  qdrant_storage:
