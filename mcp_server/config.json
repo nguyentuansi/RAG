@@ -1,0 +1,154 @@
+{
+  "server": {
+    "name": "visual-rag-system",
+    "version": "0.1.0", 
+    "description": "Visual RAG System MCP Server - Production-ready RAG with interactive visualization",
+    "author": "Visual RAG Demo Team",
+    "license": "MIT"
+  },
+  "capabilities": {
+    "tools": {
+      "search_documents": {
+        "description": "Search through uploaded documents using semantic similarity",
+        "parameters": ["query", "top_k", "search_type"],
+        "examples": [
+          "search_documents(query='machine learning', top_k=5)",
+          "search_documents(query='What is AI?', search_type='hybrid')"
+        ]
+      },
+      "upload_documents": {
+        "description": "Upload and process documents into the vector database",
+        "parameters": ["file_paths", "step_by_step"],
+        "examples": [
+          "upload_documents(file_paths=['doc1.pdf', 'doc2.txt'])",
+          "upload_documents(file_paths=['research.pdf'], step_by_step=true)"
+        ]
+      },
+      "get_pipeline_status": {
+        "description": "Get current status and metrics of the RAG pipeline",
+        "parameters": [],
+        "examples": ["get_pipeline_status()"]
+      },
+      "benchmark_models": {
+        "description": "Benchmark different embedding models for performance",
+        "parameters": ["models", "test_texts"],
+        "examples": [
+          "benchmark_models()",
+          "benchmark_models(models=['bge-m3', 'nomic-v2'])"
+        ]
+      },
+      "explain_embeddings": {
+        "description": "Generate beginner-friendly explanation of embeddings",
+        "parameters": ["text_example", "model"],
+        "examples": [
+          "explain_embeddings(text_example='Hello world')",
+          "explain_embeddings(text_example='AI is powerful', model='bge-m3')"
+        ]
+      }
+    },
+    "resources": {
+      "pipeline_status": {
+        "uri": "rag://pipeline/status",
+        "description": "Real-time pipeline status and metrics",
+        "content_type": "application/json"
+      },
+      "available_models": {
+        "uri": "rag://models/available", 
+        "description": "List of available embedding models with specifications",
+        "content_type": "application/json"
+      },
+      "document_summary": {
+        "uri": "rag://documents/summary",
+        "description": "Summary of processed documents and search history",
+        "content_type": "application/json"
+      },
+      "current_config": {
+        "uri": "rag://config/current",
+        "description": "Current pipeline configuration settings",
+        "content_type": "application/json"
+      }
+    }
+  },
+  "pipeline": {
+    "default_embedding_model": "bge-m3",
+    "chunk_size": 512,
+    "chunk_overlap": 50,
+    "vector_collection": "rag_documents",
+    "supported_formats": ["pdf", "txt", "md", "json", "docx"]
+  },
+  "models": {
+    "embedding_models": [
+      {
+        "name": "bge-m3",
+        "display_name": "BGE-M3",
+        "description": "Best for multilingual and high-accuracy applications",
+        "dimensions": 1024,
+        "max_length": 8192,
+        "multilingual": true,
+        "recommended_for": ["accuracy", "multilingual", "research"]
+      },
+      {
+        "name": "nomic-v2", 
+        "display_name": "Nomic Embed V2",
+        "description": "MoE model with flexible dimensions",
+        "dimensions": 768,
+        "max_length": 8192,
+        "multilingual": true,
+        "flexible_dims": [768, 512, 256, 128],
+        "recommended_for": ["flexibility", "efficiency", "research"]
+      },
+      {
+        "name": "e5-base",
+        "display_name": "E5 Base V2", 
+        "description": "Fast and reliable general-purpose model",
+        "dimensions": 768,
+        "max_length": 512,
+        "multilingual": false,
+        "recommended_for": ["speed", "reliability", "english"]
+      },
+      {
+        "name": "minilm",
+        "display_name": "MiniLM L6 V2",
+        "description": "Fastest option for speed-critical applications", 
+        "dimensions": 384,
+        "max_length": 256,
+        "multilingual": false,
+        "speed_optimized": true,
+        "recommended_for": ["speed", "mobile", "prototyping"]
+      }
+    ]
+  },
+  "integration": {
+    "claude_desktop": {
+      "install_instructions": "Add this server to your claude_desktop_config.json",
+      "config_example": {
+        "mcpServers": {
+          "visual-rag-system": {
+            "command": "python",
+            "args": ["-m", "mcp_server.server"],
+            "env": {
+              "QDRANT_HOST": "localhost",
+              "QDRANT_PORT": "6333"
+            }
+          }
+        }
+      }
+    },
+    "api_endpoints": {
+      "dashboard": "http://localhost:8501",
+      "qdrant": "http://localhost:6333", 
+      "health_check": "http://localhost:6333/health"
+    }
+  },
+  "documentation": {
+    "getting_started": "Run 'python run.py --mode visual' to start the dashboard",
+    "cli_usage": "Run 'python run.py --mode cli' for command-line interface",
+    "mcp_setup": "Configure your MCP client to connect to this server",
+    "examples_repository": "See README.md for complete examples"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "handlers": ["console", "file"]
+  }
+}
