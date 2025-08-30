@@ -1,0 +1,83 @@
+# Nomic Embed V2 Model Configuration  
+# Best for: Flexible dimensions, efficient inference, research
+
+model:
+  name: "Nomic Embed V2"
+  identifier: "nomic-v2"
+  model_path: "nomic-ai/nomic-embed-text-v2"
+  description: "First general-purpose MoE text embedding model with Matryoshka learning"
+
+specifications:
+  dimensions: 768  # Default, supports 768→128 truncation
+  matryoshka_dimensions: [768, 512, 256, 128]
+  max_sequence_length: 8192
+  model_size: "1.8GB"
+  parameters: "475M total, 305M active"
+  architecture: "mixture_of_experts"
+
+capabilities:
+  multilingual: true
+  supported_languages: 100+
+  matryoshka_representation: true
+  dynamic_routing: true  # MoE activates only subset of parameters
+  
+performance:
+  # Based on Nomic's benchmarks
+  retrieval_accuracy: 0.862  # Top-5 accuracy on MTEB
+  speed_rank: 2  # Faster than BGE-M3, slower than MiniLM
+  memory_usage: "medium"
+  inference_efficiency: "high"  # Due to MoE architecture
+  recommended_for:
+    - flexible_dimension_requirements
+    - research_applications
+    - efficient_inference_needs
+    - cost_sensitive_deployments
+
+training:
+  training_data: "1.6B+ text pairs"
+  training_objective: "contrastive_learning + MoE_routing"
+  special_features:
+    - "Mixture of Experts (8 experts, top-2 routing)"
+    - "Matryoshka representation learning"
+    - "Multilingual training"
+
+usage_examples:
+  flexible_dimensions: |
+    model = EmbeddingModelFactory.create_model('nomic-v2')
+    # Full 768 dimensions
+    embeddings_768 = model.encode(texts, dimensionality=768)
+    # Smaller 256 dimensions for faster search
+    embeddings_256 = model.encode(texts, dimensionality=256)
+    
+  task_prefixing: |
+    # Nomic works better with task prefixes
+    search_texts = [f"search_document: {text}" for text in documents]
+    query_text = f"search_query: {user_query}"
+    embeddings = model.encode(search_texts + [query_text])
+    
+  batch_optimization: |
+    # MoE architecture is efficient for large batches
+    batch_size = 64  # Larger batches work well
+    for batch in chunks(corpus, batch_size):
+        embeddings = model.encode(batch)
+
+optimization_tips:
+  - "Use task prefixes: 'search_document:', 'search_query:'"
+  - "Leverage Matryoshka dimensions for speed/accuracy tradeoff"
+  - "Larger batch sizes benefit from MoE architecture"
+  - "Consider 512D or 256D for speed-critical applications"
+
+matryoshka_guidance:
+  768: "Full accuracy, use for final rankings"
+  512: "Good balance of speed and accuracy"
+  256: "Fast search, good for first-stage retrieval"
+  128: "Very fast, use for approximate matching"
+
+integration_notes:
+  qdrant_distance: "cosine"
+  recommended_top_k: 5-15  # Works well with higher k
+  good_score_threshold: 0.75
+  dimension_flexibility: "Can truncate embeddings after creation"
+  works_well_with:
+    - multi_stage_retrieval
+    - adaptive_search_systems

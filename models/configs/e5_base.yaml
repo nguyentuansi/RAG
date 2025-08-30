@@ -1,0 +1,82 @@
+# E5 Base V2 Model Configuration
+# Best for: Balanced performance, reliable results, English-focused
+
+model:
+  name: "E5 Base V2"
+  identifier: "e5-base"
+  model_path: "intfloat/e5-base-v2"
+  description: "Reliable general-purpose embedding model from Microsoft"
+
+specifications:
+  dimensions: 768
+  max_sequence_length: 512
+  model_size: "440MB"
+  parameters: "110M"
+  architecture: "bert_based"
+
+capabilities:
+  multilingual: false  # Primarily English-focused
+  supported_languages: ["English"]
+  prefix_required: false  # Unlike E5 v1
+  
+performance:
+  # Based on MTEB benchmarks
+  retrieval_accuracy: 0.835  # Good balance
+  speed_rank: 1  # Among the fastest
+  memory_usage: "low"
+  latency: "~80ms per batch"
+  recommended_for:
+    - english_applications
+    - speed_critical_systems
+    - resource_constrained_environments
+    - production_deployments
+
+training:
+  training_data: "Large-scale text pairs"
+  training_objective: "contrastive_learning"
+  special_features:
+    - "No prefix requirements (improved from E5 v1)"
+    - "Optimized for English text"
+    - "Stable and reliable performance"
+
+usage_examples:
+  basic_usage: |
+    model = EmbeddingModelFactory.create_model('e5-base')
+    embeddings = model.encode(["Quick and reliable embedding"])
+    
+  batch_processing: |
+    # E5 is efficient for batch processing
+    documents = load_english_documents()
+    embeddings = model.encode(documents, batch_size=32)
+    
+  search_pipeline: |
+    # Simple and effective search
+    query_embedding = model.encode(user_query)
+    doc_embeddings = model.encode(document_texts)
+    similarities = cosine_similarity([query_embedding], doc_embeddings)
+
+optimization_tips:
+  - "No special prefixes needed - just use raw text"
+  - "Works well with smaller batch sizes (16-32)"
+  - "Good for CPU inference due to smaller size"
+  - "Consider for latency-sensitive applications"
+
+performance_characteristics:
+  strength: "Speed and reliability"
+  weakness: "Limited multilingual support"
+  sweet_spot: "English documents, fast retrieval"
+  
+integration_notes:
+  qdrant_distance: "cosine"
+  recommended_top_k: 3-7
+  good_score_threshold: 0.7
+  cpu_friendly: true
+  works_well_with:
+    - lightweight_applications
+    - edge_deployments
+    - english_content_systems
+
+comparison_notes:
+  vs_bge_m3: "Faster but less multilingual, lower accuracy"
+  vs_nomic_v2: "Simpler but less flexible, no dimension options"
+  vs_minilm: "Higher accuracy but slightly slower"

@@ -1,0 +1,106 @@
+# MiniLM L6 V2 Model Configuration
+# Best for: Speed-critical applications, edge deployment, limited resources
+
+model:
+  name: "MiniLM L6 V2"
+  identifier: "minilm"
+  model_path: "sentence-transformers/all-MiniLM-L6-v2"
+  description: "Lightweight, fast embedding model optimized for speed"
+
+specifications:
+  dimensions: 384
+  max_sequence_length: 256
+  model_size: "90MB"
+  parameters: "22M"
+  architecture: "distilled_bert"
+
+capabilities:
+  multilingual: false  # English-focused
+  supported_languages: ["English"]
+  speed_optimized: true
+  memory_efficient: true
+  
+performance:
+  # Based on sentence-transformers benchmarks
+  retrieval_accuracy: 0.795  # Lower but acceptable
+  speed_rank: 1  # Fastest option
+  memory_usage: "very_low"
+  latency: "~20ms per batch"
+  recommended_for:
+    - speed_critical_applications
+    - edge_devices
+    - mobile_applications
+    - prototype_development
+    - large_scale_batch_processing
+
+training:
+  training_data: "Sentence pairs with distillation"
+  training_objective: "knowledge_distillation + contrastive_learning"
+  special_features:
+    - "Distilled from larger teacher models"
+    - "Optimized for inference speed"
+    - "Compact representation"
+
+usage_examples:
+  speed_critical: |
+    model = EmbeddingModelFactory.create_model('minilm')
+    # Very fast embedding generation
+    embeddings = model.encode(texts, batch_size=64)
+    
+  edge_deployment: |
+    # Suitable for CPU-only environments
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU
+    model = EmbeddingModelFactory.create_model('minilm', device='cpu')
+    
+  large_scale_processing: |
+    # Process millions of documents quickly
+    for chunk in huge_document_corpus:
+        embeddings = model.encode(chunk, batch_size=128)
+        # Low memory usage allows large batches
+
+optimization_tips:
+  - "Use large batch sizes (64-128) for maximum throughput"
+  - "Perfect for CPU-only inference"
+  - "Consider for real-time applications"
+  - "Good for initial prototyping before upgrading to larger models"
+
+performance_characteristics:
+  strength: "Speed, memory efficiency, simplicity"
+  weakness: "Lower accuracy, shorter sequences, English-only"
+  sweet_spot: "Fast search over large corpora"
+  
+use_cases:
+  ideal_for:
+    - "Real-time search suggestions"
+    - "Large corpus preprocessing"  
+    - "Mobile applications"
+    - "IoT devices"
+    - "Cost-sensitive deployments"
+  
+  not_ideal_for:
+    - "High-accuracy requirements"
+    - "Multilingual content"
+    - "Long document processing"
+    - "Academic research"
+
+integration_notes:
+  qdrant_distance: "cosine"
+  recommended_top_k: 5-10  # Higher k compensates for lower precision
+  good_score_threshold: 0.6  # Lower threshold due to model limitations
+  dimensions: 384  # Remember to configure vector DB accordingly
+  works_well_with:
+    - fast_reranking_models
+    - multi_stage_retrieval
+    - approximate_search_systems
+
+deployment_advantages:
+  - "Fits in mobile app bundles"
+  - "Low GPU memory requirements"
+  - "Fast cold start times"
+  - "Minimal infrastructure costs"
+
+comparison_notes:
+  vs_e5_base: "Much faster but lower accuracy"
+  vs_bge_m3: "10x faster but significantly lower accuracy"
+  vs_nomic_v2: "Faster but no flexibility features"

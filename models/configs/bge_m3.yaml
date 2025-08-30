@@ -1,0 +1,67 @@
+# BGE-M3 Model Configuration
+# Best for: Multilingual applications, hybrid search, high accuracy
+
+model:
+  name: "BGE-M3"
+  identifier: "bge-m3"
+  model_path: "BAAI/bge-m3"
+  description: "Multi-lingual, multi-functionality, multi-granularity embedding model"
+
+specifications:
+  dimensions: 1024
+  max_sequence_length: 8192
+  model_size: "2.3GB"
+  parameters: "568M"
+  
+capabilities:
+  multilingual: true
+  supported_languages: 100+
+  search_types:
+    - dense_retrieval
+    - sparse_retrieval  # Requires FlagEmbedding library
+    - multi_vector      # For passage-level retrieval
+  
+performance:
+  # Based on MTEB benchmarks
+  retrieval_accuracy: 0.872  # Average across MTEB retrieval tasks
+  speed_rank: 3  # 1=fastest, 4=slowest among our models
+  memory_usage: "high"
+  recommended_for:
+    - multilingual_applications
+    - hybrid_search_systems
+    - high_accuracy_requirements
+    - research_applications
+
+training:
+  training_data: "1.6B+ text pairs"
+  languages_trained: "100+ languages"
+  training_objective: "contrastive_learning + sparse_learning"
+
+usage_examples:
+  basic_dense_search: |
+    model = EmbeddingModelFactory.create_model('bge-m3')
+    embeddings = model.encode(["Hello world", "Bonjour monde"])
+    
+  multilingual_search: |
+    texts = ["English text", "Texto en español", "Texte français"]
+    embeddings = model.encode(texts, normalize_embeddings=True)
+    
+  batch_processing: |
+    large_corpus = load_documents()
+    for batch in chunks(large_corpus, 32):
+        embeddings = model.encode(batch)
+        store_embeddings(embeddings)
+
+optimization_tips:
+  - "Use batch processing for better throughput"
+  - "Normalize embeddings for cosine similarity search"
+  - "Consider using sparse retrieval for keyword matching"
+  - "Enable GPU for faster inference with large batches"
+
+integration_notes:
+  qdrant_distance: "cosine"
+  recommended_top_k: 5-10
+  good_score_threshold: 0.7
+  works_well_with:
+    - reranking_models
+    - hybrid_search_pipelines
