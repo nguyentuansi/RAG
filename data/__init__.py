@@ -1,0 +1,1 @@
+# Data directory - contains sample documents and processed data

@@ -1,0 +1,161 @@
+# RAG Pipeline Configuration - Single Source of Truth
+
+# Embedding Models (100% Open Source)
+embedding_models:
+  default: "all-mpnet-base-v2"  # Updated to most reliable model
+  
+  all-MiniLM-L6-v2:
+    name: "MiniLM L6 V2"
+    model_path: "sentence-transformers/all-MiniLM-L6-v2"
+    dimensions: 384
+    max_sequence_length: 256
+    speed_optimized: true
+    description: "🚀 Fastest - Great for speed, good accuracy (384D)"
+    
+  all-mpnet-base-v2:
+    name: "MPNet Base V2"
+    model_path: "sentence-transformers/all-mpnet-base-v2"
+    dimensions: 768
+    max_sequence_length: 384
+    description: "⚖️ Balanced - Excellent accuracy-speed balance (768D)"
+    
+  bge-small-en-v1.5:
+    name: "BGE Small EN"
+    model_path: "BAAI/bge-small-en-v1.5"
+    dimensions: 384
+    max_sequence_length: 512
+    description: "🎯 Efficient - High accuracy with small size (384D)"
+    
+  e5-base-v2:
+    name: "E5 Base V2"
+    model_path: "intfloat/e5-base-v2"
+    dimensions: 768
+    max_sequence_length: 512
+    prefix_required: false
+    description: "🧠 Accurate - Microsoft E5, very reliable (768D)"
+    
+  bge-base-en-v1.5:
+    name: "BGE Base EN"
+    model_path: "BAAI/bge-base-en-v1.5"
+    dimensions: 768
+    max_sequence_length: 512
+    description: "🏆 Premium - SOTA accuracy for English (768D)"
+
+# Text Chunking Configuration
+chunking:
+  method: "semantic"  # "current" for character-based, "semantic" for sentence-aware
+  strategy: "recursive"
+  chunk_size: 512
+  overlap: 100  # Increased from 50 for better context continuity
+  separators: ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]  # Added more separators
+  min_chunk_size: 100
+  max_chunk_size: 1024
+  preserve_sentences: true
+  preserve_paragraphs: true
+  use_semantic_overlap: true
+
+# Qdrant Vector Database
+vectordb:
+  collection_name: "rag_documents"
+  distance_metric: "cosine"  # Supported: "cosine", "euclidean"
+  available_metrics:
+    cosine:
+      name: "Cosine Similarity"
+      description: "Measures angle between vectors (0-1 scale, higher = more similar)"
+      best_for: "Semantic similarity, text embeddings"
+      scale: "0 (dissimilar) to 1 (identical)"
+    euclidean:
+      name: "Euclidean Distance"  
+      description: "Straight-line distance in vector space (lower = more similar)"
+      best_for: "Magnitude-sensitive comparisons"
+      scale: "0 (identical) to ∞ (dissimilar)"
+  hnsw_config:
+    m: 32  # Increased from 16 for better recall
+    ef_construct: 400  # Increased from 200 for better index quality
+    full_scan_threshold: 20000  # Use exact search for small collections
+  quantization:
+    type: "scalar"
+    quantile: 0.99
+
+# Qdrant Connection Settings
+qdrant:
+  host: "localhost"
+  port: 6333
+  api_key: null  # Set if using Qdrant Cloud
+  prefer_grpc: true
+  
+# Search Configuration
+search:
+  top_k: 5
+  score_threshold: 0.3  # Lowered from 0.7 - less restrictive
+  search_types:
+    - "dense"      # Pure vector similarity
+    - "hybrid"     # Dense + sparse (if supported)
+    - "mmr"        # Maximal Marginal Relevance
+
+# Pipeline Stages Configuration
+pipeline:
+  stages:
+    document_ingestion:
+      name: "📄 Document Loading"
+      description: "Load and validate documents"
+      supported_formats: ["pdf", "txt", "md", "json", "docx"]
+      batch_size: 10
+      
+    text_chunking:
+      name: "✂️ Text Chunking"
+      description: "Split documents into searchable chunks"
+      show_overlap: true
+      preview_chunks: 3
+      
+    embedding_generation:
+      name: "🔢 Vector Embeddings"
+      description: "Convert text to numerical vectors"
+      batch_size: 32
+      show_progress: true
+      
+    vector_indexing:
+      name: "📊 Vector Indexing"
+      description: "Store vectors in searchable database"
+      index_batch_size: 100
+      update_existing: true
+      
+    search_retrieval:
+      name: "🔍 Similarity Search"
+      description: "Find relevant documents for queries"
+      enable_reranking: false
+      
+    response_generation:
+      name: "💬 Answer Generation"
+      description: "Generate responses using retrieved context"
+      max_context_length: 4000
+
+# Visual Dashboard Configuration
+dashboard:
+  theme: "light"
+  update_interval: 1.0  # seconds
+  max_log_entries: 1000
+  charts:
+    pipeline_flow: true
+    embedding_space: true
+    search_results: true
+    performance_metrics: true
+
+# Monitoring and Logging
+monitoring:
+  log_level: "INFO"
+  metrics:
+    - processing_speed
+    - memory_usage
+    - search_latency
+    - embedding_time
+  alerts:
+    memory_threshold: 0.8  # 80% of available memory
+    latency_threshold: 5.0  # 5 seconds
+
+# Development and Debug
+development:
+  debug_mode: false
+  sample_data: true
+  mock_embeddings: false
+  disable_gpu: false
