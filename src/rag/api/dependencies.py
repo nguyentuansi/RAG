@@ -4,17 +4,12 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, Header, HTTPException, Request, status
 
-from src.rag.core.config import Settings
-from src.rag.core.exceptions import AuthenticationError
+from src.rag.core.config import Settings, get_settings
 from src.rag.infrastructure.cache.redis import RedisCache
 from src.rag.infrastructure.embeddings.base import EmbeddingProvider
 from src.rag.infrastructure.vector_store.base import VectorStore
-
-
-def get_settings(request: Request) -> Settings:
-    return request.app.state.settings
 
 
 def get_vector_store(request: Request) -> VectorStore:
@@ -32,31 +27,39 @@ def get_cache(request: Request) -> RedisCache:
 async def get_current_user(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict:
-    """Extract and validate the authenticated user from the request."""
-    from src.rag.security.auth import verify_token
+    """Authenticate via JWT bearer token or API key."""
+    from src.rag.security.auth import decode_access_token, verify_api_key
+    from src.rag.core.exceptions import AuthenticationError
 
-    token: str | None = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ")
+        try:
+            return decode_access_token(token, settings.jwt_secret_key, settings.jwt_algorithm)
+        except AuthenticationError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header[7:]
+    if x_api_key:
+        user = await verify_api_key(x_api_key, cache=request.app.state.cache)
+        if user:
+            return user
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
-    if not token:
-        api_key = request.headers.get(settings.api_key_header)
-        if api_key:
-            from src.rag.security.auth import verify_api_key
-            return await verify_api_key(api_key)
-
-    if not token:
-        raise AuthenticationError("Missing authentication credentials")
-
-    return await verify_token(token, settings.jwt_secret_key, settings.jwt_algorithm)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
-# Type aliases for DI
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
 EmbeddingProviderDep = Annotated[EmbeddingProvider, Depends(get_embedding_provider)]
 CacheDep = Annotated[RedisCache, Depends(get_cache)]
-SettingsDep = Annotated[Settings, Depends(get_settings)]
 CurrentUserDep = Annotated[dict, Depends(get_current_user)]
+SettingsDep = Annotated[Settings, Depends(get_settings)]

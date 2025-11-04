@@ -6,109 +6,78 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
 
-class ComponentStatus(BaseModel):
-    name: str
-    status: str
-    latency_ms: float | None = None
-    details: dict[str, Any] = {}
-
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    uptime_seconds: float
-    components: list[ComponentStatus]
-
-
-_start_time = time.monotonic()
-
-
-@router.get("/health", response_model=HealthResponse)
-async def health_check(request: Request) -> HealthResponse:
-    """Full health check with component status."""
-    components: list[ComponentStatus] = []
-
-    # Vector store check
+async def _check_vector_store(request: Request) -> dict[str, Any]:
     try:
-        t0 = time.monotonic()
-        vector_store = request.app.state.vector_store
-        await vector_store.collection_exists("_health_probe")
-        components.append(ComponentStatus(
-            name="vector_store",
-            status="ok",
-            latency_ms=round((time.monotonic() - t0) * 1000, 2),
-        ))
+        vs = request.app.state.vector_store
+        from src.rag.core.config import get_settings
+        settings = get_settings()
+        count = await vs.count(settings.collection_name)
+        return {"status": "ok", "vector_count": count}
     except Exception as exc:
-        components.append(ComponentStatus(
-            name="vector_store",
-            status="degraded",
-            details={"error": str(exc)},
-        ))
+        return {"status": "error", "detail": str(exc)}
 
-    # Redis check
+
+async def _check_cache(request: Request) -> dict[str, Any]:
     try:
-        t0 = time.monotonic()
         cache = request.app.state.cache
-        await cache.get("_health_probe")
-        components.append(ComponentStatus(
-            name="cache",
-            status="ok",
-            latency_ms=round((time.monotonic() - t0) * 1000, 2),
-        ))
+        probe_key = "health:probe"
+        await cache.set(probe_key, "1", ttl=10)
+        val = await cache.get(probe_key)
+        return {"status": "ok" if val == "1" else "degraded"}
     except Exception as exc:
-        components.append(ComponentStatus(
-            name="cache",
-            status="degraded",
-            details={"error": str(exc)},
-        ))
+        return {"status": "error", "detail": str(exc)}
 
-    # Embedding model check
+
+async def _check_embedding(request: Request) -> dict[str, Any]:
     try:
-        embedding_provider = request.app.state.embedding_provider
-        ready = await embedding_provider.is_ready()
-        components.append(ComponentStatus(
-            name="embedding_model",
-            status="ok" if ready else "loading",
-            details={"model": embedding_provider.model_name},
-        ))
+        ep = request.app.state.embedding_provider
+        ready = await ep.is_ready()
+        return {"status": "ok" if ready else "loading", "model": ep.model_name}
     except Exception as exc:
-        components.append(ComponentStatus(
-            name="embedding_model",
-            status="degraded",
-            details={"error": str(exc)},
-        ))
+        return {"status": "error", "detail": str(exc)}
 
-    overall = "ok" if all(c.status == "ok" for c in components) else "degraded"
 
-    return HealthResponse(
-        status=overall,
-        version="0.1.0",
-        uptime_seconds=round(time.monotonic() - _start_time, 1),
-        components=components,
+@router.get("", summary="Full health check with component details")
+async def health(request: Request) -> JSONResponse:
+    start = time.monotonic()
+
+    components = {
+        "vector_store": await _check_vector_store(request),
+        "cache": await _check_cache(request),
+        "embedding": await _check_embedding(request),
+    }
+
+    all_ok = all(c["status"] == "ok" for c in components.values())
+    any_error = any(c["status"] == "error" for c in components.values())
+
+    overall = "healthy" if all_ok else ("degraded" if not any_error else "unhealthy")
+    status_code = 200 if overall in {"healthy", "degraded"} else 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": overall,
+            "latency_ms": round((time.monotonic() - start) * 1000, 2),
+            "components": components,
+        },
     )
 
 
-@router.get("/health/live")
-async def liveness() -> dict[str, str]:
-    """Kubernetes liveness probe — just confirms process is up."""
-    return {"status": "ok"}
+@router.get("/ready", summary="Readiness probe (k8s)")
+async def readiness(request: Request) -> JSONResponse:
+    """Returns 200 once all dependencies are ready to serve traffic."""
+    ep = request.app.state.embedding_provider
+    if not await ep.is_ready():
+        return JSONResponse(status_code=503, content={"ready": False, "reason": "model_loading"})
+    return JSONResponse(status_code=200, content={"ready": True})
 
 
-@router.get("/health/ready")
-async def readiness(request: Request) -> dict[str, str]:
-    """Kubernetes readiness probe — confirms app can serve traffic."""
-    try:
-        embedding_provider = request.app.state.embedding_provider
-        ready = await embedding_provider.is_ready()
-        if not ready:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=503, detail="Embedding model still loading")
-        return {"status": "ready"}
-    except Exception:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=503, detail="Not ready")
+@router.get("/live", summary="Liveness probe (k8s)")
+async def liveness() -> JSONResponse:
+    """Always returns 200 while the process is alive."""
+    return JSONResponse(status_code=200, content={"alive": True})
