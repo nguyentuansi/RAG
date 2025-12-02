@@ -1,1 +1,1 @@
-"""Security: authentication, RBAC, prompt injection detection."""
+"""Security: authentication, authorization, and threat detection."""
