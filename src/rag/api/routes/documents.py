@@ -3,19 +3,13 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Annotated
-from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 
-from src.rag.api.dependencies import (
-    CacheDep,
-    CurrentUserDep,
-    EmbeddingProviderDep,
-    SettingsDep,
-    VectorStoreDep,
-)
+from src.rag.api.dependencies import CurrentUserDep, EmbeddingProviderDep, SettingsDep, VectorStoreDep
 from src.rag.core.exceptions import DocumentNotFoundError, DocumentTooLargeError, UnsupportedDocumentFormatError
 from src.rag.core.logging import get_logger
 from src.rag.domain.documents import Document, DocumentFormat, DocumentMetadata, DocumentStatus
@@ -24,203 +18,108 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
-class DocumentUploadResponse(BaseModel):
-    document_id: str
-    status: str
-    message: str
+class DocumentResponse(BaseModel):
+    id: str
+    status: DocumentStatus
+    format: DocumentFormat
+    chunk_count: int
+    word_count: int
+    metadata: dict
+    created_at: str
 
 
 class DocumentListResponse(BaseModel):
-    items: list[dict]
+    items: list[DocumentResponse]
     total: int
     page: int
     page_size: int
 
 
-class BatchIngestRequest(BaseModel):
-    texts: list[str]
-    sources: list[str] | None = None
-    collection_name: str | None = None
+class DeleteResponse(BaseModel):
+    deleted: bool
+    document_id: str
+    chunks_removed: int
 
 
-@router.post("/documents/upload", response_model=DocumentUploadResponse, status_code=202)
+@router.post(
+    "/upload",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload and index a document",
+)
 async def upload_document(
-    file: Annotated[UploadFile, File(description="Document file to ingest")],
-    background_tasks: BackgroundTasks,
-    settings: SettingsDep,
+    file: UploadFile,
     vector_store: VectorStoreDep,
     embedding_provider: EmbeddingProviderDep,
-    cache: CacheDep,
+    settings: SettingsDep,
     current_user: CurrentUserDep,
-    collection_name: str = Query(default=None),
-) -> DocumentUploadResponse:
-    """Upload and asynchronously ingest a document into the vector store."""
+    title: str | None = Query(default=None),
+    tags: str | None = Query(default=None, description="Comma-separated tags"),
+) -> DocumentResponse:
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    content = await file.read()
+    content_bytes = await file.read()
 
-    if len(content) > max_bytes:
+    if len(content_bytes) > max_bytes:
         raise DocumentTooLargeError(
             f"File exceeds {settings.max_upload_size_mb} MB limit",
-            details={"size_bytes": len(content), "max_bytes": max_bytes},
+            details={"size_bytes": len(content_bytes), "limit_bytes": max_bytes},
         )
 
-    filename = file.filename or "unknown"
-    ext = "." + filename.rsplit(".", 1)[-1] if "." in filename else ""
+    filename = file.filename or "upload"
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ".txt"
     try:
-        doc_format = DocumentFormat.from_extension(ext)
+        fmt = DocumentFormat.from_extension(ext)
     except ValueError:
-        raise UnsupportedDocumentFormatError(
-            f"Unsupported file type: {ext}",
-            details={"filename": filename},
-        )
+        raise UnsupportedDocumentFormatError(f"Unsupported file type: {ext}")
+
+    tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    metadata = DocumentMetadata(
+        source=filename,
+        title=title or filename,
+        tags=tag_list,
+        custom={"uploaded_by": current_user.get("sub", "unknown")},
+    )
 
     doc = Document(
-        content=content.decode("utf-8", errors="replace"),
-        format=doc_format,
-        metadata=DocumentMetadata(
-            source=filename,
-            title=filename,
-        ),
+        content=content_bytes.decode("utf-8", errors="replace"),
+        format=fmt,
+        metadata=metadata,
     )
 
-    target_collection = collection_name or settings.collection_name
+    # Kick off pipeline asynchronously (fire-and-forget in background task)
+    import asyncio
+    asyncio.create_task(_index_document(doc, vector_store, embedding_provider, settings))
 
-    background_tasks.add_task(
-        _ingest_document_task,
-        doc=doc,
-        collection_name=target_collection,
-        vector_store=vector_store,
-        embedding_provider=embedding_provider,
-    )
+    logger.info("document_upload_accepted", doc_id=str(doc.id), filename=filename)
 
-    logger.info(
-        "document_upload_accepted",
-        document_id=str(doc.id),
-        filename=filename,
-        size_bytes=len(content),
-        user=current_user.get("sub"),
-    )
-
-    return DocumentUploadResponse(
-        document_id=str(doc.id),
-        status="accepted",
-        message=f"Document queued for ingestion into collection '{target_collection}'",
+    return DocumentResponse(
+        id=str(doc.id),
+        status=doc.status,
+        format=doc.format,
+        chunk_count=doc.chunk_count,
+        word_count=doc.word_count,
+        metadata=doc.metadata.model_dump(),
+        created_at=doc.created_at.isoformat(),
     )
 
 
-@router.get("/documents/{document_id}")
-async def get_document(
-    document_id: UUID,
-    vector_store: VectorStoreDep,
-    settings: SettingsDep,
-    current_user: CurrentUserDep,
-) -> dict:
-    """Retrieve a document's metadata by ID."""
-    results = await vector_store.search(
-        collection_name=settings.collection_name,
-        query_vector=[0.0] * 768,
-        filters={"document_id": str(document_id)},
-        top_k=1,
-    )
-    if not results:
-        raise DocumentNotFoundError(
-            f"Document '{document_id}' not found",
-            details={"document_id": str(document_id)},
-        )
-    payload = results[0].payload
-    return {
-        "document_id": str(document_id),
-        "source": payload.get("source"),
-        "chunk_count": payload.get("chunk_count", 0),
-        "metadata": payload,
-    }
-
-
-@router.delete("/documents/{document_id}", status_code=204)
-async def delete_document(
-    document_id: UUID,
-    vector_store: VectorStoreDep,
-    settings: SettingsDep,
-    current_user: CurrentUserDep,
-) -> None:
-    """Delete all chunks belonging to a document."""
-    # Search for all chunks of this document
-    results = await vector_store.search(
-        collection_name=settings.collection_name,
-        query_vector=[0.0] * 768,
-        filters={"document_id": str(document_id)},
-        top_k=1000,
-    )
-    if not results:
-        raise DocumentNotFoundError(f"Document '{document_id}' not found")
-
-    chunk_ids = [r.id for r in results]
-    deleted = await vector_store.delete_vectors(settings.collection_name, chunk_ids)
-
-    logger.info(
-        "document_deleted",
-        document_id=str(document_id),
-        chunks_deleted=deleted,
-        user=current_user.get("sub"),
-    )
-
-
-@router.post("/documents/batch", response_model=DocumentUploadResponse, status_code=202)
-async def batch_ingest(
-    request: BatchIngestRequest,
-    background_tasks: BackgroundTasks,
-    settings: SettingsDep,
-    vector_store: VectorStoreDep,
-    embedding_provider: EmbeddingProviderDep,
-    current_user: CurrentUserDep,
-) -> DocumentUploadResponse:
-    """Ingest multiple raw text strings in one request."""
-    if not request.texts:
-        raise HTTPException(status_code=422, detail="texts list cannot be empty")
-
-    collection_name = request.collection_name or settings.collection_name
-
-    background_tasks.add_task(
-        _batch_ingest_task,
-        texts=request.texts,
-        sources=request.sources or [f"batch_{i}" for i in range(len(request.texts))],
-        collection_name=collection_name,
-        vector_store=vector_store,
-        embedding_provider=embedding_provider,
-    )
-
-    return DocumentUploadResponse(
-        document_id="batch",
-        status="accepted",
-        message=f"{len(request.texts)} texts queued for ingestion",
-    )
-
-
-async def _ingest_document_task(
-    doc: Document,
-    collection_name: str,
-    vector_store,
-    embedding_provider,
-) -> None:
-    """Background task: chunk → embed → index."""
+async def _index_document(doc, vector_store, embedding_provider, settings) -> None:
     from src.rag.pipeline.chunking import ChunkingPipeline
     from src.rag.pipeline.embedding import AsyncEmbeddingPipeline
+    from src.rag.domain.chunks import ChunkingConfig, ChunkingStrategy
     from src.rag.infrastructure.vector_store.base import VectorRecord
-    from src.rag.domain.chunks import ChunkingConfig
 
-    t0 = time.monotonic()
     try:
         doc.mark_processing()
-        chunker = ChunkingPipeline(ChunkingConfig())
-        chunks = chunker.chunk(doc)
+
+        chunker = ChunkingPipeline(ChunkingConfig(
+            strategy=ChunkingStrategy.RECURSIVE,
+            chunk_size=settings.default_chunk_size,
+            chunk_overlap=settings.default_chunk_overlap,
+        ))
+        chunks = chunker.chunk_document(doc)
 
         embedder = AsyncEmbeddingPipeline(embedding_provider)
         embedded = await embedder.embed_chunks(chunks)
-
-        await vector_store.create_collection(
-            collection_name,
-            vector_size=embedding_provider.dimension,
-        )
 
         records = [
             VectorRecord(
@@ -230,39 +129,77 @@ async def _ingest_document_task(
             )
             for ec in embedded
         ]
-        await vector_store.upsert_vectors(collection_name, records)
-        doc.mark_indexed(len(records))
 
-        logger.info(
-            "document_ingested",
-            document_id=str(doc.id),
-            chunks=len(records),
-            elapsed_ms=round((time.monotonic() - t0) * 1000, 2),
-        )
+        await vector_store.upsert_vectors(settings.collection_name, records)
+        doc.mark_indexed(chunk_count=len(chunks))
+        logger.info("document_indexed", doc_id=str(doc.id), chunks=len(chunks))
     except Exception as exc:
         doc.mark_failed(str(exc))
-        logger.error("document_ingestion_failed", document_id=str(doc.id), error=str(exc))
+        logger.error("document_indexing_failed", doc_id=str(doc.id), error=str(exc))
 
 
-async def _batch_ingest_task(
-    texts: list[str],
-    sources: list[str],
-    collection_name: str,
-    vector_store,
-    embedding_provider,
-) -> None:
-    from src.rag.infrastructure.vector_store.base import VectorRecord
-    from uuid import uuid4
+@router.get("/{document_id}", summary="Get document by ID")
+async def get_document(
+    document_id: str,
+    vector_store: VectorStoreDep,
+    settings: SettingsDep,
+    current_user: CurrentUserDep,
+) -> dict:
+    # Retrieve a sample vector to confirm the doc exists
+    sample = await vector_store.search(
+        settings.collection_name,
+        query_vector=[0.0] * 768,
+        top_k=1,
+        filters={"document_id": document_id},
+    )
+    if not sample:
+        raise DocumentNotFoundError(f"Document '{document_id}' not found")
 
-    await vector_store.create_collection(collection_name, vector_size=embedding_provider.dimension)
-    vectors = await embedding_provider.embed_batch(texts)
-    records = [
-        VectorRecord(
-            id=str(uuid4()),
-            vector=v,
-            payload={"content": texts[i], "source": sources[i], "chunk_index": i},
-        )
-        for i, v in enumerate(vectors)
-    ]
-    await vector_store.upsert_vectors(collection_name, records)
-    logger.info("batch_ingested", count=len(records), collection=collection_name)
+    payload = sample[0].payload
+    return {
+        "document_id": document_id,
+        "source": payload.get("source"),
+        "chunk_count": payload.get("chunk_index", 0) + 1,
+        "metadata": {k: v for k, v in payload.items() if k not in {"content", "embedding"}},
+    }
+
+
+@router.delete("/{document_id}", summary="Delete document and its vectors")
+async def delete_document(
+    document_id: str,
+    vector_store: VectorStoreDep,
+    settings: SettingsDep,
+    current_user: CurrentUserDep,
+) -> DeleteResponse:
+    results = await vector_store.search(
+        settings.collection_name,
+        query_vector=[0.0] * 768,
+        top_k=1000,
+        filters={"document_id": document_id},
+    )
+    if not results:
+        raise DocumentNotFoundError(f"Document '{document_id}' not found")
+
+    chunk_ids = [r.id for r in results]
+    deleted = await vector_store.delete_vectors(settings.collection_name, chunk_ids)
+    logger.info("document_deleted", doc_id=document_id, chunks_removed=deleted)
+
+    return DeleteResponse(deleted=True, document_id=document_id, chunks_removed=deleted)
+
+
+@router.get("", summary="List documents (paginated)")
+async def list_documents(
+    vector_store: VectorStoreDep,
+    settings: SettingsDep,
+    current_user: CurrentUserDep,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    info = await vector_store.get_collection_info(settings.collection_name)
+    return {
+        "total_vectors": info.vector_count,
+        "collection": settings.collection_name,
+        "page": page,
+        "page_size": page_size,
+        "note": "Use /search to query documents by content",
+    }
