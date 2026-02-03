@@ -1,91 +1,84 @@
-"""Redis-backed sliding-window rate limiter middleware."""
+"""Sliding-window rate limiter middleware backed by Redis."""
 
 from __future__ import annotations
 
 import time
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.types import ASGIApp
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from src.rag.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-_SKIP_PATHS = frozenset({"/health", "/health/live", "/health/ready"})
+EXEMPT_PATHS = {"/health", "/health/ready", "/health/live", "/metrics"}
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
-    Sliding window rate limiter backed by Redis.
+    Per-user sliding window rate limiter.
 
-    Limits are applied per (IP, user_id) pair when a user is authenticated,
-    otherwise per IP address.
+    Uses a Redis sorted set where each member is a timestamp.
+    Members older than the window are purged on each request.
     """
 
-    def __init__(
-        self,
-        app: ASGIApp,
-        *,
-        requests_per_minute: int = 60,
-        burst: int = 10,
-    ) -> None:
+    def __init__(self, app, requests_per_minute: int = 60, burst: int = 10) -> None:
         super().__init__(app)
-        self._rpm = requests_per_minute
-        self._burst = burst
-        self._window = 60  # seconds
+        self.rpm = requests_per_minute
+        self.burst = burst
+        self.window_seconds = 60
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.url.path in _SKIP_PATHS:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 
         try:
             cache = request.app.state.cache
-        except AttributeError:
-            return await call_next(request)
+            user_key = self._identify(request)
+            redis_key = f"ratelimit:{user_key}"
+            now = time.time()
+            window_start = now - self.window_seconds
 
-        client_ip = request.client.host if request.client else "unknown"
-        user_id = getattr(request.state, "user_id", None)
-        key = f"rate:{user_id or client_ip}"
+            client = cache._require_client()
+            pipe = client.pipeline()
+            pipe.zremrangebyscore(cache._prefixed(redis_key), 0, window_start)
+            pipe.zcard(cache._prefixed(redis_key))
+            pipe.zadd(cache._prefixed(redis_key), {str(now): now})
+            pipe.expire(cache._prefixed(redis_key), self.window_seconds + 1)
+            _, count, *_ = await pipe.execute()
 
-        now = int(time.time())
-        window_start = now - self._window
+            remaining = max(0, self.rpm - count)
+            reset_at = int(now) + self.window_seconds
 
-        try:
-            pipe_key = f"rl:{key}:{now // self._window}"
-            count = await cache.increment(pipe_key)
-            if count == 1:
-                await cache.expire(pipe_key, self._window * 2)
-
-            limit = self._rpm + self._burst
-            if count > limit:
-                logger.warning(
-                    "rate_limit_exceeded",
-                    client=client_ip,
-                    user=user_id,
-                    count=count,
-                    limit=limit,
-                )
-                return JSONResponse(
+            if count > self.rpm + self.burst:
+                logger.warning("rate_limit_exceeded", user_key=user_key, count=count)
+                return Response(
+                    content='{"error":"RATE_LIMIT_EXCEEDED","message":"Too many requests"}',
                     status_code=429,
-                    content={
-                        "error": "RATE_LIMIT_EXCEEDED",
-                        "message": f"Too many requests. Limit: {self._rpm}/min",
-                        "retry_after": self._window,
-                    },
+                    media_type="application/json",
                     headers={
-                        "Retry-After": str(self._window),
-                        "X-RateLimit-Limit": str(self._rpm),
+                        "X-RateLimit-Limit": str(self.rpm),
                         "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Reset": str(reset_at),
+                        "Retry-After": str(self.window_seconds),
                     },
                 )
 
             response = await call_next(request)
-            response.headers["X-RateLimit-Limit"] = str(self._rpm)
-            response.headers["X-RateLimit-Remaining"] = str(max(0, limit - count))
+            response.headers["X-RateLimit-Limit"] = str(self.rpm)
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
+            response.headers["X-RateLimit-Reset"] = str(reset_at)
             return response
 
-        except Exception as exc:
-            logger.warning("rate_limit_check_failed", error=str(exc))
+        except Exception:
+            # Never block a request due to rate limiter failure
             return await call_next(request)
+
+    def _identify(self, request: Request) -> str:
+        if auth := request.headers.get("authorization"):
+            return f"token:{hash(auth) & 0xFFFFFF}"
+        if api_key := request.headers.get("x-api-key"):
+            return f"key:{hash(api_key) & 0xFFFFFF}"
+        forwarded = request.headers.get("x-forwarded-for")
+        ip = forwarded.split(",")[0].strip() if forwarded else request.client.host if request.client else "unknown"
+        return f"ip:{ip}"
