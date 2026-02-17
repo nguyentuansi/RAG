@@ -1,9 +1,10 @@
-"""Text chunking strategies: recursive, semantic, sliding window, markdown-header."""
+"""Advanced text chunking strategies."""
 
 from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from typing import Callable
 from uuid import uuid4
 
 from src.rag.core.logging import get_logger
@@ -18,235 +19,181 @@ class BaseChunker(ABC):
         self.config = config
 
     @abstractmethod
-    def split(self, text: str, document_id: str) -> list[TextChunk]:
+    def chunk(self, text: str, document_id) -> list[TextChunk]:
         ...
 
-    def _make_chunk(
-        self,
-        content: str,
-        index: int,
-        start: int,
-        end: int,
-        document_id: str,
-        metadata: ChunkMetadata | None = None,
-    ) -> TextChunk:
+    def _make_chunk(self, text: str, doc_id, index: int, start: int, end: int, **meta) -> TextChunk:
         return TextChunk(
             chunk_id=str(uuid4()),
-            document_id=document_id,  # type: ignore[arg-type]
-            content=content,
+            document_id=doc_id,
+            content=text,
             chunk_index=index,
             start_char=start,
             end_char=end,
-            chunk_metadata=metadata or ChunkMetadata(),
-            token_estimate=len(content.split()),
+            token_estimate=len(text.split()),
+            chunk_metadata=ChunkMetadata(**meta),
         )
 
 
 class RecursiveCharacterChunker(BaseChunker):
-    """
-    LangChain-style recursive character splitter.
+    """Split on separators from coarsest to finest until chunks are small enough."""
 
-    Tries each separator in order, preferring the one that keeps chunks
-    within config.chunk_size while maintaining context with overlap.
-    """
-
-    def split(self, text: str, document_id: str) -> list[TextChunk]:
-        raw_chunks = self._recursive_split(text, self.config.separators)
-        chunks: list[TextChunk] = []
-        pos = 0
-
+    def chunk(self, text: str, document_id) -> list[TextChunk]:
+        raw_chunks = self._split(text, self.config.separators)
+        results, char_offset = [], 0
         for i, chunk_text in enumerate(raw_chunks):
-            start = text.find(chunk_text, pos)
+            start = text.find(chunk_text, char_offset)
             if start == -1:
-                start = pos
+                start = char_offset
             end = start + len(chunk_text)
-            pos = max(pos, start + 1)
+            char_offset = max(char_offset, end - self.config.chunk_overlap)
+            if len(chunk_text.strip()) >= self.config.min_chunk_size:
+                results.append(self._make_chunk(chunk_text.strip(), document_id, i, start, end))
+        return results
 
-            if len(chunk_text) >= self.config.min_chunk_size:
-                chunks.append(self._make_chunk(chunk_text, len(chunks), start, end, document_id))
-
-        return chunks
-
-    def _recursive_split(self, text: str, separators: list[str]) -> list[str]:
+    def _split(self, text: str, separators: list[str]) -> list[str]:
         if not separators:
-            return self._split_by_size(text)
-
+            return self._fixed_split(text)
         sep = separators[0]
-        if sep:
-            splits = text.split(sep)
-        else:
-            splits = list(text)
-
-        good: list[str] = []
-        pending = ""
-
-        for fragment in splits:
-            candidate = (pending + sep + fragment).strip() if pending else fragment.strip()
+        if not sep:
+            return self._fixed_split(text)
+        parts = text.split(sep)
+        chunks: list[str] = []
+        current = ""
+        for part in parts:
+            candidate = (current + sep + part).strip() if current else part
             if len(candidate) <= self.config.chunk_size:
-                pending = candidate
+                current = candidate
             else:
-                if pending:
-                    good.append(pending)
-                    overlap_words = pending.split()[-self.config.chunk_overlap // 5 :]
-                    pending = " ".join(overlap_words) + " " + fragment.strip()
+                if current:
+                    chunks.append(current)
+                if len(part) > self.config.chunk_size:
+                    chunks.extend(self._split(part, separators[1:]))
+                    current = ""
                 else:
-                    sub = self._recursive_split(fragment, separators[1:])
-                    good.extend(sub)
-                    pending = ""
-
-        if pending:
-            good.append(pending)
-
-        return [g for g in good if g.strip()]
-
-    def _split_by_size(self, text: str) -> list[str]:
-        chunks = []
-        for i in range(0, len(text), self.config.chunk_size - self.config.chunk_overlap):
-            chunks.append(text[i : i + self.config.chunk_size])
+                    current = part
+        if current:
+            chunks.append(current)
         return chunks
+
+    def _fixed_split(self, text: str) -> list[str]:
+        size, overlap = self.config.chunk_size, self.config.chunk_overlap
+        return [text[i : i + size] for i in range(0, len(text), size - overlap) if text[i : i + size].strip()]
 
 
 class SemanticChunker(BaseChunker):
-    """
-    Sentence-boundary aware chunker.
+    """Chunk at sentence boundaries, grouping sentences until size limit."""
 
-    Groups sentences into chunks that don't exceed chunk_size while
-    respecting paragraph and section boundaries.
-    """
+    _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])|(?<=\.)\n+(?=[A-Z\d\-•])")
 
-    _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])|(?<=\n)\s*\n")
-
-    def split(self, text: str, document_id: str) -> list[TextChunk]:
-        sentences = self._SENTENCE_END.split(text)
-        chunks: list[TextChunk] = []
+    def chunk(self, text: str, document_id) -> list[TextChunk]:
+        sentences = [s.strip() for s in self._SENTENCE_END.split(text) if s.strip()]
+        results: list[TextChunk] = []
         current: list[str] = []
         current_len = 0
-        pos = 0
+        char_offset = 0
+        chunk_idx = 0
 
         for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-
-            s_len = len(sentence)
-            if current_len + s_len > self.config.chunk_size and current:
-                content = " ".join(current)
-                start = text.find(current[0], pos)
-                end = start + len(content)
-                chunks.append(self._make_chunk(content, len(chunks), start, end, document_id))
-                # carry overlap sentences
-                overlap = []
+            if current_len + len(sentence) > self.config.chunk_size and current:
+                body = " ".join(current)
+                start = text.find(body, char_offset)
+                end = start + len(body)
+                results.append(self._make_chunk(body, document_id, chunk_idx, start, end))
+                chunk_idx += 1
+                # Overlap: keep last sentence(s) whose total fits overlap budget
+                overlap_buf: list[str] = []
                 overlap_len = 0
                 for s in reversed(current):
                     if overlap_len + len(s) <= self.config.chunk_overlap:
-                        overlap.insert(0, s)
+                        overlap_buf.insert(0, s)
                         overlap_len += len(s)
                     else:
                         break
-                current = overlap
+                current = overlap_buf
                 current_len = overlap_len
-                pos = max(pos, start + 1)
-
+                char_offset = max(0, end - self.config.chunk_overlap)
             current.append(sentence)
-            current_len += s_len
+            current_len += len(sentence)
 
         if current:
-            content = " ".join(current)
-            start = text.find(current[0], pos)
-            end = start + len(content)
-            chunks.append(self._make_chunk(content, len(chunks), start, end, document_id))
-
-        return chunks
+            body = " ".join(current)
+            start = text.find(body, char_offset)
+            end = start + len(body) if start != -1 else char_offset + len(body)
+            results.append(self._make_chunk(body, document_id, chunk_idx, max(0, start), end))
+        return results
 
 
 class SlidingWindowChunker(BaseChunker):
-    """Fixed-size sliding window with configurable overlap."""
+    """Fixed-size sliding window with configurable stride."""
 
-    def split(self, text: str, document_id: str) -> list[TextChunk]:
-        chunks: list[TextChunk] = []
-        step = self.config.chunk_size - self.config.chunk_overlap
-
-        for i, start in enumerate(range(0, len(text), step)):
-            end = min(start + self.config.chunk_size, len(text))
-            content = text[start:end].strip()
-            if len(content) >= self.config.min_chunk_size:
-                chunks.append(self._make_chunk(content, i, start, end, document_id))
-
-        return chunks
+    def chunk(self, text: str, document_id) -> list[TextChunk]:
+        size = self.config.chunk_size
+        stride = size - self.config.chunk_overlap
+        results = []
+        i = 0
+        idx = 0
+        while i < len(text):
+            window = text[i : i + size]
+            if len(window.strip()) >= self.config.min_chunk_size:
+                results.append(self._make_chunk(window.strip(), document_id, idx, i, i + len(window)))
+                idx += 1
+            i += stride
+        return results
 
 
 class MarkdownHeaderChunker(BaseChunker):
-    """
-    Splits Markdown by headers, keeping each section as a chunk.
-    Falls back to recursive splitting for sections that exceed chunk_size.
-    """
+    """Split markdown at heading boundaries and sub-chunk oversized sections."""
 
     _HEADER = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
-    def split(self, text: str, document_id: str) -> list[TextChunk]:
-        header_positions = [(m.start(), m.end(), m.group(2)) for m in self._HEADER.finditer(text)]
-        if not header_positions:
-            return RecursiveCharacterChunker(self.config).split(text, document_id)
+    def chunk(self, text: str, document_id) -> list[TextChunk]:
+        boundaries = [(m.start(), m.group(1), m.group(2)) for m in self._HEADER.finditer(text)]
+        if not boundaries:
+            return RecursiveCharacterChunker(self.config).chunk(text, document_id)
 
-        sections: list[tuple[int, int, str]] = []
-        for i, (start, end, heading) in enumerate(header_positions):
-            section_end = header_positions[i + 1][0] if i + 1 < len(header_positions) else len(text)
-            sections.append((start, section_end, heading))
+        sections: list[tuple[str, str, str]] = []
+        for i, (start, level, heading) in enumerate(boundaries):
+            end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(text)
+            sections.append((heading, level, text[start:end]))
 
-        chunks: list[TextChunk] = []
-        fallback = RecursiveCharacterChunker(self.config)
-
-        for section_start, section_end, heading in sections:
-            content = text[section_start:section_end].strip()
-            if not content:
-                continue
-            if len(content) <= self.config.chunk_size:
-                chunks.append(
-                    self._make_chunk(
-                        content,
-                        len(chunks),
-                        section_start,
-                        section_end,
-                        document_id,
-                        metadata=ChunkMetadata(heading=heading),
-                    )
+        results: list[TextChunk] = []
+        char_offset = 0
+        for idx, (heading, level, body) in enumerate(sections):
+            if len(body) <= self.config.chunk_size:
+                start = text.find(body, char_offset)
+                end = start + len(body)
+                results.append(
+                    self._make_chunk(body.strip(), document_id, idx, start, end, heading=heading, section=level)
                 )
+                char_offset = end
             else:
-                sub = fallback.split(content, document_id)
-                for sc in sub:
-                    chunks.append(
-                        TextChunk(
-                            chunk_id=sc.chunk_id,
-                            document_id=sc.document_id,
-                            content=sc.content,
-                            chunk_index=len(chunks),
-                            start_char=section_start + sc.start_char,
-                            end_char=section_start + sc.end_char,
-                            chunk_metadata=ChunkMetadata(heading=heading),
-                            token_estimate=sc.token_estimate,
-                        )
-                    )
-
-        return chunks
+                sub = RecursiveCharacterChunker(self.config).chunk(body, document_id)
+                results.extend(sub)
+        return results
 
 
-class ChunkingPipeline:
-    """Entry point: selects and applies the appropriate chunking strategy."""
-
-    _CHUNKERS: dict[ChunkingStrategy, type[BaseChunker]] = {
+class ChunkingStrategyFactory:
+    _registry: dict[ChunkingStrategy, type[BaseChunker]] = {
         ChunkingStrategy.RECURSIVE: RecursiveCharacterChunker,
         ChunkingStrategy.SEMANTIC: SemanticChunker,
         ChunkingStrategy.SLIDING_WINDOW: SlidingWindowChunker,
         ChunkingStrategy.MARKDOWN_HEADER: MarkdownHeaderChunker,
     }
 
+    @classmethod
+    def create(cls, config: ChunkingConfig) -> BaseChunker:
+        klass = cls._registry.get(config.strategy, RecursiveCharacterChunker)
+        return klass(config)
+
+
+class ChunkingPipeline:
     def __init__(self, config: ChunkingConfig) -> None:
         self.config = config
-        chunker_cls = self._CHUNKERS.get(config.strategy, RecursiveCharacterChunker)
-        self._chunker = chunker_cls(config)
+        self._chunker = ChunkingStrategyFactory.create(config)
 
     def chunk_document(self, document: Document) -> list[TextChunk]:
-        chunks = self._chunker.split(document.content, str(document.id))
+        chunks = self._chunker.chunk(document.content, document.id)
         logger.info(
             "document_chunked",
             doc_id=str(document.id),
