@@ -1,0 +1,27 @@
+# Development image with hot reload and debug tools
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git vim procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Dev extras
+RUN pip install \
+    watchfiles \
+    ipython \
+    rich \
+    httpie
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.rag.api.app:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--reload", "--reload-dir", "/app/src"]
