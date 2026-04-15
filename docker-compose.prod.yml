@@ -1,8 +1,5 @@
 version: "3.9"
 
-# Production compose — use with: docker compose -f docker-compose.prod.yml up -d
-# Secrets are mounted from ./secrets/ directory (not committed to git).
-
 x-logging: &default-logging
   driver: "json-file"
   options:
@@ -10,137 +7,167 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
-
-  # ── RAG API ──────────────────────────────────────────────────────────────
+  # ── RAG API ───────────────────────────────────────────────────────────────
   rag-api:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      target: runtime
     image: rag-platform:latest
-    restart: unless-stopped
-    env_file: .env
+    restart: always
+    ports:
+      - "8000:8000"
     environment:
       ENVIRONMENT: production
+      LOG_LEVEL: INFO
       QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
       REDIS_URL: redis://redis:6379/0
-    ports:
-      - "127.0.0.1:8000:8000"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-sentence-transformers/all-mpnet-base-v2}"
+      COLLECTION_NAME: "${COLLECTION_NAME:-rag_documents}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-https://your-domain.com}"
+    env_file: .env
     depends_on:
       qdrant:
         condition: service_healthy
       redis:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 4G
-        reservations:
-          memory: 1G
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+        reservations:
+          memory: 1G
     logging: *default-logging
-    volumes:
-      - model_cache:/home/rag/.cache
+    networks:
+      - rag-internal
+      - rag-external
 
-  # ── Qdrant ───────────────────────────────────────────────────────────────
+  # ── Qdrant Vector DB ──────────────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.12.5
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6333:6333"
+    image: qdrant/qdrant:v1.13.0
+    restart: always
     volumes:
-      - qdrant_storage:/qdrant/storage
+      - qdrant_data:/qdrant/storage
     environment:
       QDRANT__SERVICE__HTTP_PORT: 6333
       QDRANT__SERVICE__GRPC_PORT: 6334
-      QDRANT__LOG_LEVEL: WARN
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 4G
+      QDRANT__LOG_LEVEL: INFO
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 15s
-      timeout: 5s
+      interval: 30s
+      timeout: 10s
       retries: 5
-    logging: *default-logging
-
-  # ── Redis ─────────────────────────────────────────────────────────────────
-  redis:
-    image: redis:7.4-alpine
-    restart: unless-stopped
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
-    volumes:
-      - redis_data:/data
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: 512M
+          memory: 8G
+          cpus: "4.0"
+        reservations:
+          memory: 2G
+    logging: *default-logging
+    networks:
+      - rag-internal
+
+  # ── Redis Cache ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    restart: always
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru --save 900 1 --save 300 10
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: "0.5"
     logging: *default-logging
+    networks:
+      - rag-internal
 
-  # ── Nginx (reverse proxy) ────────────────────────────────────────────────
+  # ── Nginx Reverse Proxy ───────────────────────────────────────────────────
   nginx:
     image: nginx:1.27-alpine
-    restart: unless-stopped
+    restart: always
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/etc/nginx/certs:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
     depends_on:
-      - rag-api
+      rag-api:
+        condition: service_healthy
     logging: *default-logging
+    networks:
+      - rag-external
 
-  # ── Prometheus ───────────────────────────────────────────────────────────
+  # ── Prometheus ────────────────────────────────────────────────────────────
   prometheus:
-    image: prom/prometheus:v2.55.1
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
+    image: prom/prometheus:v2.55.0
+    restart: always
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
     logging: *default-logging
+    networks:
+      - rag-internal
 
   # ── Grafana ───────────────────────────────────────────────────────────────
   grafana:
-    image: grafana/grafana:11.4.0
-    restart: unless-stopped
+    image: grafana/grafana:11.3.0
+    restart: always
     ports:
-      - "127.0.0.1:3000:3000"
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-changeme}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
       - grafana_data:/var/lib/grafana
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_password
-    secrets:
-      - grafana_password
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     depends_on:
       - prometheus
     logging: *default-logging
+    networks:
+      - rag-internal
+
+networks:
+  rag-internal:
+    driver: bridge
+    internal: true
+  rag-external:
+    driver: bridge
 
 volumes:
-  qdrant_storage:
+  qdrant_data:
+    driver: local
   redis_data:
+    driver: local
   prometheus_data:
+    driver: local
   grafana_data:
-  model_cache:
-
-secrets:
-  grafana_password:
-    file: ./secrets/grafana_password.txt
+    driver: local
+  nginx_logs:
+    driver: local
