@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed the vector store with sample documents for development and demo purposes."""
+"""Seed sample documents into the RAG vector store."""
 
 from __future__ import annotations
 
@@ -7,216 +7,271 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 
 SAMPLE_DOCUMENTS = [
     {
-        "title": "Introduction to RAG Systems",
-        "source": "docs/intro-to-rag.md",
+        "title": "Introduction to Retrieval-Augmented Generation",
+        "source": "docs/rag-intro.md",
         "content": """
 # Introduction to Retrieval-Augmented Generation
 
-Retrieval-Augmented Generation (RAG) is an AI framework that combines information
-retrieval with language model generation. Instead of relying solely on the knowledge
-baked into a language model's weights, RAG systems first retrieve relevant documents
-from an external knowledge base, then use those documents as context to generate
-accurate, up-to-date responses.
+Retrieval-Augmented Generation (RAG) is a technique that combines the strengths of
+retrieval-based systems with generative language models. Instead of relying solely
+on a language model's parametric knowledge, RAG dynamically retrieves relevant
+documents from an external knowledge base before generating a response.
 
-## Why RAG?
+## How RAG Works
 
-Traditional language models have several limitations:
-- Knowledge cutoff: They cannot access information after their training date
-- Hallucinations: They may generate plausible-sounding but incorrect information
-- Source attribution: It's difficult to trace which training data influenced a response
+1. **Query encoding**: The user's query is converted into a dense vector using an
+   embedding model such as sentence-transformers.
 
-RAG addresses these limitations by grounding generation in retrieved evidence.
+2. **Semantic retrieval**: The query vector is compared against stored document
+   vectors using cosine similarity or other distance metrics.
 
-## Core Components
+3. **Context injection**: The top-k most relevant documents are injected as context
+   into the prompt sent to the language model.
 
-A production RAG pipeline consists of:
-1. **Document Ingestion**: Load, parse, and preprocess source documents
-2. **Text Chunking**: Split documents into semantically coherent chunks
-3. **Embedding Generation**: Convert chunks to dense vector representations
-4. **Vector Indexing**: Store vectors in a searchable index (e.g. Qdrant)
-5. **Query Processing**: Embed the user query using the same model
-6. **Retrieval**: Find the most similar chunks via ANN search
-7. **Generation**: Pass retrieved context to an LLM to generate the final answer
-""".strip(),
+4. **Grounded generation**: The LLM generates a response grounded in the retrieved
+   facts, reducing hallucination significantly.
+
+## Key Benefits
+
+- **Reduced hallucination**: Responses are grounded in retrieved facts.
+- **Up-to-date knowledge**: The knowledge base can be updated without retraining.
+- **Source attribution**: Retrieved documents can be cited as sources.
+- **Domain specificity**: Works well for niche domains not covered by LLM training.
+
+## Common Architectures
+
+### Naive RAG
+The simplest form: embed, retrieve, generate. Works for straightforward Q&A.
+
+### Advanced RAG
+Includes query rewriting, re-ranking, and iterative retrieval for better results.
+
+### Modular RAG
+Composable pipeline stages that can be swapped independently.
+        """.strip(),
+        "tags": ["rag", "introduction", "tutorial"],
     },
     {
-        "title": "Vector Databases Explained",
+        "title": "Vector Databases: A Comparison",
         "source": "docs/vector-databases.md",
         "content": """
-# Vector Databases
+# Vector Databases: A Comparison Guide
 
-A vector database is a specialized database designed to store and query high-dimensional
-vector embeddings efficiently. Unlike traditional relational databases optimized for
-exact matches, vector databases excel at approximate nearest-neighbor (ANN) search.
-
-## How They Work
-
-When you embed a piece of text using a language model, you get a dense float vector
-(e.g., 768 or 1536 dimensions). Similar texts produce vectors that are close together
-in this high-dimensional space. Vector databases build special index structures —
-such as HNSW (Hierarchical Navigable Small World) graphs — that allow you to find
-the k nearest vectors to a query vector in milliseconds, even with millions of stored
-vectors.
+Vector databases are specialized storage systems optimised for high-dimensional
+vector operations, particularly approximate nearest-neighbour (ANN) search.
 
 ## Popular Options
 
-- **Qdrant**: Rust-based, open source, Kubernetes-native, excellent performance
-- **Weaviate**: GraphQL API, built-in vectorization, good for hybrid search
-- **Pinecone**: Fully managed cloud service, simplest to get started with
-- **Chroma**: Lightweight, perfect for prototyping and local development
-- **pgvector**: PostgreSQL extension for teams that want to stay in SQL
+### Qdrant
+- Written in Rust — high performance and memory safety
+- Supports scalar and product quantization
+- Payload filtering with strong consistency guarantees
+- HNSW index with configurable M and ef_construct parameters
+- Cloud-hosted and self-hosted options
 
-## Choosing a Distance Metric
+### Pinecone
+- Fully managed SaaS — zero operational overhead
+- Metadata filtering at query time
+- Serverless tier with usage-based pricing
+- Limited to cloud deployment
 
-- **Cosine similarity**: Best for text embeddings (normalized vectors)
-- **Euclidean (L2)**: Better when vector magnitudes carry meaning
-- **Dot product**: Fastest but sensitive to magnitude; use with normalized embeddings
-""".strip(),
+### Weaviate
+- GraphQL query interface
+- Built-in vectorization modules
+- Multi-modal support
+- HNSW-based approximate search
+
+### Chroma
+- Lightweight, embedded, great for prototyping
+- Python-native API
+- Not recommended for production at scale
+
+## Choosing the Right Vector Store
+
+| Criterion         | Qdrant | Pinecone | Weaviate | Chroma |
+|-------------------|--------|----------|----------|--------|
+| Self-hosted       | ✅     | ❌       | ✅       | ✅     |
+| Filtering         | ✅     | ✅       | ✅       | Partial|
+| Quantization      | ✅     | ✅       | ❌       | ❌     |
+| Production-ready  | ✅     | ✅       | ✅       | ❌     |
+
+## Qdrant Configuration Tips
+
+For production workloads, tune HNSW parameters:
+- `m=16` to `m=32`: higher M increases recall but uses more memory
+- `ef_construct=200` to `ef_construct=400`: better index quality at build time
+- Enable on-disk vectors for large collections to reduce RAM usage
+        """.strip(),
+        "tags": ["vector-database", "qdrant", "comparison"],
     },
     {
-        "title": "Chunking Strategies for RAG",
-        "source": "docs/chunking-strategies.md",
+        "title": "Embedding Models for Semantic Search",
+        "source": "docs/embedding-models.md",
         "content": """
-# Text Chunking Strategies
+# Embedding Models for Semantic Search
 
-How you split documents into chunks has a significant impact on RAG retrieval quality.
-Chunks that are too large waste context window space; chunks that are too small lose
-necessary context.
+Embedding models transform text into fixed-length numerical vectors that capture
+semantic meaning. Choosing the right model significantly affects retrieval quality.
 
-## Fixed-Size Chunking
+## Key Metrics
 
-The simplest approach: split every N characters with an M-character overlap.
+- **Dimension**: Higher dimensions capture more nuance but require more storage.
+- **Max sequence length**: The maximum number of tokens the model can encode.
+- **Speed**: Inference time per batch — critical at scale.
+- **MTEB Score**: Benchmark across multiple embedding tasks.
 
-Pros: Fast, predictable chunk sizes, easy to reason about
-Cons: May split in the middle of sentences or concepts
+## Top Open-Source Models (2025)
 
-## Recursive Character Chunking
+### all-mpnet-base-v2 (768d)
+A robust general-purpose model from sentence-transformers. Excellent balance of
+speed and accuracy. Recommended starting point for English text.
 
-Try multiple separator characters in order (double newline → newline → period → space)
-and pick the first that keeps chunks under the size limit.
+### BAAI/bge-m3 (1024d)
+Multi-lingual model from BAAI. State-of-the-art performance on BEIR benchmark.
+Supports dense, sparse, and multi-vector retrieval.
 
-This is the LangChain default and works well for most prose documents.
+### intfloat/e5-large-v2 (1024d)
+Microsoft's E5 model family. Particularly strong on question-answering tasks.
+Requires "query:" / "passage:" prefix for optimal performance.
 
-## Semantic Chunking
+### nomic-ai/nomic-embed-text-v2 (768d)
+Open-source competitor to OpenAI's text-embedding-3-small. Strong on long-document
+embedding due to extended context window (8192 tokens).
 
-Split at sentence boundaries, grouping sentences into chunks until a size limit is
-reached. More expensive but produces chunks that always end at sentence boundaries,
-improving retrieval precision.
+## Batch Embedding at Scale
 
-## Document-Aware Chunking
+For production systems, use batched embedding to maximise GPU utilisation:
 
-For structured documents (Markdown, HTML, PDFs with headers), respect the document
-structure. Split at header boundaries first, then apply recursive splitting within
-oversized sections. This preserves the semantic hierarchy and allows you to attach
-heading metadata to each chunk.
+```python
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer("BAAI/bge-m3")
+embeddings = model.encode(texts, batch_size=64, show_progress_bar=True)
+```
 
-## Practical Recommendations
-
-- Start with chunk_size=512, chunk_overlap=100 and iterate
-- Always include overlapping context to avoid losing information at boundaries
-- For code: split at function/class boundaries, not arbitrary character positions
-- For tables: keep the entire table in one chunk; never split across rows
-""".strip(),
+Always normalise embeddings before storing (`normalize_embeddings=True`) to enable
+cosine similarity via dot product, which is faster than computing full cosine sim.
+        """.strip(),
+        "tags": ["embeddings", "models", "semantic-search"],
     },
     {
-        "title": "Production Deployment Best Practices",
-        "source": "docs/production-best-practices.md",
+        "title": "Production RAG System Design Patterns",
+        "source": "docs/production-patterns.md",
         "content": """
-# Production Deployment Checklist
+# Production RAG System Design Patterns
 
-## Security
+Moving a RAG prototype to production requires addressing reliability, latency,
+scalability, and security concerns not present in demos.
 
-- [ ] JWT tokens have short expiry (≤ 1 hour for access tokens)
-- [ ] API keys stored as SHA-256 hashes, never plaintext
-- [ ] Input sanitized against prompt injection before hitting the LLM
-- [ ] Rate limiting enabled (per user and global)
-- [ ] CORS restricted to known origins
-- [ ] Container runs as non-root user
+## Caching Strategies
+
+### Embedding Cache
+Cache query embeddings in Redis to avoid re-encoding identical queries:
+- Key: SHA-256 of the query text
+- TTL: 1 hour for typical workloads
+- Hit rate: typically 40-60% in production
+
+### Result Cache
+Cache search results for common queries:
+- Invalidate when new documents are indexed
+- Use shorter TTL for rapidly changing knowledge bases
+
+## Async Indexing
+
+Never index documents synchronously in the API request path. Use a background task
+queue (Celery, ARQ, or asyncio background tasks) to:
+1. Accept the document upload (return 202 Accepted)
+2. Process chunking and embedding asynchronously
+3. Update document status in the database
+4. Notify via webhook when complete
+
+## Chunking Strategy Selection
+
+| Document Type  | Recommended Strategy |
+|----------------|---------------------|
+| Markdown docs  | MarkdownHeaderChunker|
+| Code files     | AST-based chunking  |
+| Academic PDFs  | SemanticChunker     |
+| Support tickets| SlidingWindowChunker|
 
 ## Observability
 
-- [ ] Structured JSON logging with correlation IDs on every request
-- [ ] OpenTelemetry traces exported to your APM tool
-- [ ] Prometheus metrics scraped and visualized in Grafana
-- [ ] /health/live and /health/ready probes wired to Kubernetes
-- [ ] Alerts on P95 latency > 2s, error rate > 1%, cache hit rate < 50%
+Essential metrics to track:
+- `search_latency_p99`: Target < 200ms
+- `embedding_throughput`: Tokens/second
+- `cache_hit_rate`: Target > 40%
+- `indexing_queue_depth`: Alert if > 100
 
-## Reliability
+## Security Checklist
 
-- [ ] Qdrant deployed with replication (≥ 2 replicas in prod)
-- [ ] Redis configured with AOF persistence or a replica
-- [ ] Embedding model pre-loaded at startup (warm_up() in lifespan)
-- [ ] Graceful shutdown: finish in-flight requests before stopping
-- [ ] Retry with exponential back-off on transient embedding/search failures
-
-## Performance
-
-- [ ] Embedding results cached in Redis (TTL ≥ 1h for static content)
-- [ ] Search results cached with query-hash key (TTL 5 min)
-- [ ] Qdrant HNSW ef_construct ≥ 200 for production index quality
-- [ ] Batch size ≥ 32 for embedding generation throughput
-""".strip(),
+- [ ] Rate limit all public endpoints
+- [ ] Validate prompt inputs for injection patterns
+- [ ] Store API keys as hashes, never plaintext
+- [ ] Use JWT with short expiry (60 min) + refresh tokens
+- [ ] Implement RBAC before adding multi-tenant data
+        """.strip(),
+        "tags": ["production", "patterns", "architecture"],
     },
 ]
 
 
-async def seed() -> None:
-    from src.rag.core.config import get_settings
-    from src.rag.infrastructure.vector_store.qdrant import QdrantVectorStore
-    from src.rag.infrastructure.embeddings.sentence_transformer import SentenceTransformerProvider
-    from src.rag.pipeline.chunking import ChunkingPipeline
-    from src.rag.pipeline.embedding import AsyncEmbeddingPipeline
-    from src.rag.domain.documents import Document, DocumentFormat, DocumentMetadata
-    from src.rag.domain.chunks import ChunkingConfig
-    from src.rag.infrastructure.vector_store.base import VectorRecord
+async def seed(host: str = "localhost", port: int = 6333, collection: str = "rag_documents") -> None:
+    from rag.infrastructure.vector_store.qdrant import QdrantVectorStore
+    from rag.infrastructure.embeddings.sentence_transformer import SentenceTransformerProvider
+    from rag.infrastructure.vector_store.base import VectorRecord
+    from rag.pipeline.chunking import ChunkingPipeline
+    from rag.domain.documents import Document, DocumentFormat, DocumentMetadata
+    from rag.domain.chunks import ChunkingConfig, ChunkingStrategy
 
-    settings = get_settings()
+    print(f"Connecting to Qdrant at {host}:{port}...")
+    vs = QdrantVectorStore(host=host, port=port)
+    ep = SentenceTransformerProvider()
+    await ep.warm_up()
 
-    print(f"Connecting to Qdrant at {settings.qdrant_host}:{settings.qdrant_port}...")
-    vector_store = QdrantVectorStore(host=settings.qdrant_host, port=settings.qdrant_port)
-
-    print(f"Loading embedding model: {settings.embedding_model}...")
-    embedding_provider = SentenceTransformerProvider(model_name=settings.embedding_model)
-    await embedding_provider.warm_up()
-
-    chunker = ChunkingPipeline(ChunkingConfig())
-    embedder = AsyncEmbeddingPipeline(embedding_provider)
+    await vs.create_collection(collection, vector_size=ep.dimension)
+    chunker = ChunkingPipeline(ChunkingConfig(strategy=ChunkingStrategy.SEMANTIC, chunk_size=512, chunk_overlap=100))
 
     total_chunks = 0
     for sample in SAMPLE_DOCUMENTS:
         doc = Document(
             content=sample["content"],
             format=DocumentFormat.MARKDOWN,
-            metadata=DocumentMetadata(source=sample["source"], title=sample["title"]),
+            metadata=DocumentMetadata(
+                source=sample["source"],
+                title=sample["title"],
+                tags=sample["tags"],
+            ),
         )
-
         chunks = chunker.chunk_document(doc)
-        embedded = await embedder.embed_chunks(chunks)
-
-        await vector_store.create_collection(
-            settings.collection_name,
-            vector_size=embedding_provider.dimension,
-        )
+        texts = [c.content for c in chunks]
+        embeddings = await ep.embed_batch(texts)
 
         records = [
             VectorRecord(
-                id=ec.chunk.chunk_id,
-                vector=ec.embedding,
-                payload=ec.to_vector_payload(),
+                id=c.chunk_id,
+                vector=emb,
+                payload={
+                    "content": c.content,
+                    "document_id": str(doc.id),
+                    "chunk_index": c.chunk_index,
+                    "source": sample["source"],
+                    "title": sample["title"],
+                    "tags": sample["tags"],
+                },
             )
-            for ec in embedded
+            for c, emb in zip(chunks, embeddings)
         ]
-        await vector_store.upsert_vectors(settings.collection_name, records)
-        total_chunks += len(records)
-        print(f"  ✓ '{sample['title']}' → {len(records)} chunks")
+        count = await vs.upsert_vectors(collection, records)
+        total_chunks += count
+        print(f"  Indexed '{sample['title']}': {count} chunks")
 
-    print(f"\nSeeding complete: {len(SAMPLE_DOCUMENTS)} documents, {total_chunks} chunks in '{settings.collection_name}'")
-    await vector_store.close()
-    await embedding_provider.close()
+    await ep.close()
+    await vs.close()
+    print(f"\nDone. Total chunks indexed: {total_chunks}")
 
 
 if __name__ == "__main__":
