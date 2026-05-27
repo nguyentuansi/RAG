@@ -1,145 +1,128 @@
-"""RAG evaluation pipeline: run metrics, compare configs, generate reports."""
+"""RAG evaluation pipeline: dataset loading, bulk evaluation, report generation."""
 
 from __future__ import annotations
 
-import asyncio
 import json
+import statistics
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.rag.core.logging import get_logger
-from src.rag.evaluation.metrics import EvaluationSample, MetricResult, RAGMetricsCalculator
+from src.rag.evaluation.metrics import EvaluationSample, MetricResult, RAGEvaluator
 
 logger = get_logger(__name__)
 
 
-class EvaluationResult:
-    def __init__(
-        self,
-        name: str,
-        samples: list[EvaluationSample],
-        metric_results: list[list[MetricResult]],
-    ) -> None:
-        self.name = name
-        self.samples = samples
-        self.metric_results = metric_results
-        self.evaluated_at = datetime.now(timezone.utc).isoformat()
+@dataclass
+class EvaluationReport:
+    run_id: str
+    timestamp: str
+    sample_count: int
+    metric_averages: dict[str, float]
+    per_sample_results: list[dict[str, Any]]
+    config: dict[str, Any] = field(default_factory=dict)
 
-    def aggregate(self) -> dict[str, float]:
-        """Return mean score per metric across all samples."""
-        if not self.metric_results:
-            return {}
-        metric_names = [r.name for r in self.metric_results[0]]
-        aggregated: dict[str, float] = {}
-        for metric_name in metric_names:
-            scores = [
-                next((r.score for r in sample_results if r.name == metric_name), 0.0)
-                for sample_results in self.metric_results
-            ]
-            aggregated[metric_name] = round(sum(scores) / len(scores), 4) if scores else 0.0
-        return aggregated
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "evaluated_at": self.evaluated_at,
-            "num_samples": len(self.samples),
-            "aggregate_scores": self.aggregate(),
-            "per_sample": [
-                {
-                    "question": s.question[:120],
-                    "scores": {r.name: r.score for r in results},
-                }
-                for s, results in zip(self.samples, self.metric_results)
-            ],
-        }
+    def summary(self) -> str:
+        lines = [f"Evaluation Report [{self.run_id}]", f"Samples: {self.sample_count}"]
+        for metric, score in sorted(self.metric_averages.items()):
+            bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
+            lines.append(f"  {metric:<25} {bar} {score:.4f}")
+        return "\n".join(lines)
 
 
 class EvaluationPipeline:
-    """Orchestrates evaluation runs over a dataset of QA pairs."""
+    def __init__(self, evaluator: RAGEvaluator) -> None:
+        self.evaluator = evaluator
 
-    def __init__(self, embedding_provider=None) -> None:
-        self._calculator = RAGMetricsCalculator(embedding_provider)
+    def load_dataset(self, path: str | Path) -> list[EvaluationSample]:
+        """Load evaluation dataset from a JSONL file."""
+        samples: list[EvaluationSample] = []
+        path = Path(path)
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                samples.append(EvaluationSample(
+                    question=obj["question"],
+                    answer=obj["answer"],
+                    contexts=obj.get("contexts", []),
+                    ground_truth=obj.get("ground_truth"),
+                    ground_truth_contexts=obj.get("ground_truth_contexts", []),
+                ))
+        logger.info("evaluation_dataset_loaded", path=str(path), samples=len(samples))
+        return samples
 
     async def run_evaluation(
         self,
         samples: list[EvaluationSample],
         *,
-        name: str = "evaluation",
-        concurrency: int = 4,
-    ) -> EvaluationResult:
-        """Run all metrics on each sample with bounded concurrency."""
-        semaphore = asyncio.Semaphore(concurrency)
+        run_id: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> EvaluationReport:
+        if not run_id:
+            run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
-        async def evaluate_one(sample: EvaluationSample) -> list[MetricResult]:
-            async with semaphore:
-                return await self._calculator.evaluate_all(sample)
+        per_sample: list[dict[str, Any]] = []
+        metric_scores: dict[str, list[float]] = {}
 
-        logger.info("evaluation_started", name=name, samples=len(samples))
-        all_results = await asyncio.gather(*[evaluate_one(s) for s in samples])
-        logger.info("evaluation_complete", name=name)
+        for i, sample in enumerate(samples):
+            logger.debug("evaluating_sample", index=i, question=sample.question[:60])
+            results = await self.evaluator.evaluate_all(sample)
+            sample_dict: dict[str, Any] = {
+                "index": i,
+                "question": sample.question,
+                "metrics": {k: asdict(v) for k, v in results.items()},
+            }
+            per_sample.append(sample_dict)
+            for name, result in results.items():
+                metric_scores.setdefault(name, []).append(result.score)
 
-        result = EvaluationResult(name=name, samples=samples, metric_results=list(all_results))
-        logger.info("evaluation_scores", **result.aggregate())
-        return result
+        averages = {
+            name: round(statistics.mean(scores), 4)
+            for name, scores in metric_scores.items()
+        }
+
+        report = EvaluationReport(
+            run_id=run_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            sample_count=len(samples),
+            metric_averages=averages,
+            per_sample_results=per_sample,
+            config=config or {},
+        )
+        logger.info("evaluation_complete", run_id=run_id, samples=len(samples), metrics=averages)
+        return report
+
+    def generate_report(self, report: EvaluationReport) -> dict[str, Any]:
+        return {
+            "run_id": report.run_id,
+            "timestamp": report.timestamp,
+            "sample_count": report.sample_count,
+            "metric_averages": report.metric_averages,
+            "config": report.config,
+        }
+
+    def save_results(self, report: EvaluationReport, output_path: str | Path) -> None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            for sample_result in report.per_sample_results:
+                f.write(json.dumps(sample_result) + "\n")
+        logger.info("evaluation_results_saved", path=str(path))
 
     async def compare_configurations(
         self,
         samples: list[EvaluationSample],
-        configurations: dict[str, Any],
-    ) -> dict[str, EvaluationResult]:
-        """
-        Compare multiple RAG configurations side-by-side.
-
-        Each key in configurations is a name; the value is a dict with a
-        'pipeline' callable that takes a question and returns (answer, contexts).
-        """
-        results: dict[str, EvaluationResult] = {}
-        for config_name, config in configurations.items():
-            pipeline_fn = config.get("pipeline")
-            if not pipeline_fn:
-                continue
-            augmented_samples = []
-            for sample in samples:
-                answer, contexts = await pipeline_fn(sample.question)
-                augmented_samples.append(
-                    EvaluationSample(
-                        question=sample.question,
-                        answer=answer,
-                        contexts=contexts,
-                        ground_truth=sample.ground_truth,
-                    )
-                )
-            results[config_name] = await self.run_evaluation(augmented_samples, name=config_name)
-        return results
-
-    def save_results(self, result: EvaluationResult, output_path: Path) -> None:
-        """Write evaluation results to a JSON file."""
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w") as f:
-            json.dump(result.to_dict(), f, indent=2)
-        logger.info("evaluation_saved", path=str(output_path))
-
-    def generate_report(self, result: EvaluationResult) -> str:
-        """Return a markdown-formatted evaluation report."""
-        scores = result.aggregate()
-        lines = [
-            f"# RAG Evaluation Report: {result.name}",
-            f"\nEvaluated at: {result.evaluated_at}",
-            f"Samples: {len(result.samples)}",
-            "\n## Aggregate Scores\n",
-        ]
-        for metric, score in sorted(scores.items()):
-            bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
-            lines.append(f"- **{metric}**: {score:.3f} `{bar}`")
-
-        lines.append("\n## Per-Sample Results\n")
-        for i, (sample, metric_results) in enumerate(
-            zip(result.samples, result.metric_results), 1
-        ):
-            lines.append(f"### Sample {i}: {sample.question[:80]}...")
-            for mr in metric_results:
-                lines.append(f"  - {mr.name}: {mr.score:.3f}")
-
-        return "\n".join(lines)
+        configs: list[dict[str, Any]],
+    ) -> list[EvaluationReport]:
+        """Run evaluation for multiple pipeline configurations and compare."""
+        reports = []
+        for cfg in configs:
+            run_id = cfg.get("name", f"config-{len(reports)}")
+            report = await self.run_evaluation(samples, run_id=run_id, config=cfg)
+            reports.append(report)
+        return reports
